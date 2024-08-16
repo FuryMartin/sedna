@@ -13,3 +13,4 @@ six>=1.15.0  # MIT
 minio>=7.0.3  # Apache-2.0
 uvicorn>=0.14.0  # BSD
 pycocotools
+watchdog
