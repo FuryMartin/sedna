@@ -130,7 +130,7 @@ class JobBase:
 
     @property
     def model_path(self):
-        if os.path.isfile(self.config.model_url):
+        if self.config.model_url is not None and os.path.isfile(self.config.model_url):
             return self.config.model_url
         return self.get_parameters('model_path') or FileOps.join_path(
             self.config.model_url, self.estimator.model_name)
