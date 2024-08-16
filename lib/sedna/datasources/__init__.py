@@ -15,6 +15,7 @@
 from abc import ABC
 from pathlib import Path
 
+import json
 import numpy as np
 import pandas as pd
 
@@ -218,3 +219,25 @@ class JSONDataParse(BaseDataSource, ABC):
         del im_ann, annotations
 
         return (res, img_info, file_name)
+
+class JsonlDataParse(BaseDataSource, ABC):
+    """
+    jsonl file which contain Structured Data parser
+    """
+    def __init__(self, data_type, func=None):
+        super(JsonlDataParse, self).__init__(data_type=data_type, func=func)
+
+    def parse(self, *args, **kwargs):
+        x_data = []
+        y_data = []
+        use_raw = kwargs.get("use_raw")
+        for f in args:
+            if not (f and FileOps.exists(f)):
+                continue
+            with open(f, 'r', encoding='utf-8') as file:
+                for line in file:
+                    line = json.loads(line)
+                    x_data.append(line['question'])
+                    y_data.append(line['answer'])
+        self.x = np.array(x_data)
+        self.y = np.array(y_data)
