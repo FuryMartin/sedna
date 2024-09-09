@@ -241,3 +241,40 @@ class JsonlDataParse(BaseDataSource, ABC):
                     y_data.append(line['answer'])
         self.x = np.array(x_data)
         self.y = np.array(y_data)
+
+class JSONDataInfoParse(BaseDataSource, ABC):
+    """
+    parse data_info.json file
+    """
+    def __init__(self, data_type, func=None):
+        super(JSONDataInfoParse, self).__init__(data_type=data_type, func=func)
+        self.need_other_info = True
+
+    def parse(self, *args, **kwargs):
+        for f in args:
+            if not (f and FileOps.exists(f)):
+                continue
+            with open(f, 'r', encoding='utf-8') as file:
+                json_data = json.load(file)
+                self.keys = json_data['keys']
+                self.answer_key = json_data['answer_key']
+            
+            prompt_f = f.replace('data_info.json', 'prompts.json')
+            with open(prompt_f, 'r', encoding='utf-8') as file:
+                json_data = json.load(file)
+                self.prompts = json_data
+            
+            data_f = f.replace('data_info.json', 'data.jsonl')
+            x_data = []
+            y_data = []
+            with open(data_f, 'r', encoding='utf-8') as file:
+                for line in file:
+                    line = json.loads(line)
+                    infer_user_template = self.prompts['infer_user_template']
+                    for each_key in self.keys:
+                        infer_user_template = infer_user_template.replace('{' + each_key + '}', line[each_key])
+                    infer_answer_template = self.prompts['infer_answer_template'].reace('{' + self.answer_key + '}', line[self.answer_key])
+                    x_data.append(infer_user_template)
+                    y_data.append(infer_answer_template)
+            self.x = np.array(x_data)
+            self.y = np.array(y_data)
