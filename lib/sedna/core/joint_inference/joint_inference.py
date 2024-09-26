@@ -21,6 +21,9 @@ from sedna.service.server import InferenceServer
 from sedna.service.client import ModelClient, LCReporter
 from sedna.common.constant import K8sResourceKind
 from sedna.core.base import JobBase
+import re
+
+HUGGINGFACE_PATH_PATTERN = r'^[a-zA-Z0-9][\w\-]*/[a-zA-Z0-9][\w\-\.]*$'
 
 __all__ = ("JointInference", "BigModelService")
 
@@ -142,14 +145,18 @@ class JointInference(JobBase):
     the `hard_example_mining` parameter from CRD definition.
     """
 
-    def __init__(self, estimator=None, hard_example_mining: dict = None):
+    def __init__(
+            self, 
+            estimator=None,
+            cloud=None,
+            hard_example_mining: dict = None,
+            LCReporter_enable: bool=True
+        ):
         super(JointInference, self).__init__(estimator=estimator)
+
         self.job_kind = K8sResourceKind.JOINT_INFERENCE_SERVICE.value
         self.local_ip = get_host_ip()
-        self.remote_ip = self.get_parameters(
-            "BIG_MODEL_IP", self.local_ip)
-        self.port = int(self.get_parameters("BIG_MODEL_PORT", "5000"))
-
+    
         report_msg = {
             "name": self.worker_name,
             "namespace": self.config.namespace,
@@ -159,26 +166,50 @@ class JointInference(JobBase):
             "results": []
         }
         period_interval = int(self.get_parameters("LC_PERIOD", "30"))
-        self.lc_reporter = LCReporter(lc_server=self.config.lc_server,
-                                      message=report_msg,
-                                      period_interval=period_interval)
-        self.lc_reporter.setDaemon(True)
-        self.lc_reporter.start()
+
+        self.LCReporter_enable = LCReporter_enable
+        
+        if self.LCReporter_enable:
+            self.lc_reporter = LCReporter(
+                lc_server=self.config.lc_server,
+                message=report_msg,
+                period_interval=period_interval
+            )
+            self.lc_reporter.setDaemon(True)
+            self.lc_reporter.start()
 
         if callable(self.estimator):
             self.estimator = self.estimator()
-        if not os.path.exists(self.model_path):
+
+        check_huggingface_repo = lambda x: bool(re.match(HUGGINGFACE_PATH_PATTERN, x))
+
+        if not os.path.exists(self.model_path) and not check_huggingface_repo(self.model_path):
             raise FileExistsError(f"{self.model_path} miss")
         else:
-            self.estimator.load(self.model_path)
-        self.cloud = ModelClient(service_name=self.job_name,
-                                 host=self.remote_ip, port=self.port)
+            self.estimator.load(model_url=self.model_path)
+
+        # If cloud is None, then initialize ModelClint as cloud.
+        # Otherwise, we will regard the cloud as a client implemented by the user.
+        if cloud is None:
+            self.remote_ip = self.get_parameters(
+            "BIG_MODEL_IP", self.local_ip)
+            self.port = int(self.get_parameters("BIG_MODEL_PORT", "5000"))
+
+            self.cloud = ModelClient(
+                service_name=self.job_name,
+                host=self.remote_ip, 
+                port=self.port
+            )
+        else:
+            self.cloud = cloud
+
         self.hard_example_mining_algorithm = None
         if not hard_example_mining:
             hard_example_mining = self.get_hem_algorithm_from_config()
         if hard_example_mining:
             hem = hard_example_mining.get("method", "IBT")
             hem_parameters = hard_example_mining.get("param", {})
+            # hem_parameters = hard_example_mining.get("param", {})
             self.hard_example_mining_algorithm = ClassFactory.get_cls(
                 ClassType.HEM, hem
             )(**hem_parameters)
@@ -209,6 +240,34 @@ class JointInference(JobBase):
             algorithm="HEM",
             **param
         )
+    
+    
+    def _get_edge_result(self, data, callback_func, **kwargs):
+        edge_result = self.estimator.predict(data, **kwargs)
+        res = deepcopy(edge_result)
+
+        if callback_func:
+            res = callback_func(res)
+
+        if self.LCReporter_enable:
+            self.lc_reporter.update_for_edge_inference()
+
+        return res, edge_result
+    
+    def _get_cloud_result(self, data, post_process, **kwargs):
+        cloud_result = self.cloud.inference(data, post_process=post_process, **kwargs)
+
+        res = deepcopy(cloud_result)
+
+        if self.LCReporter_enable:
+            self.lc_reporter.update_for_collaboration_inference()
+
+        return res, cloud_result
+
+    def _check_hem_algorithm(self):
+        if self.hard_example_mining_algorithm is None:
+            raise ValueError("Hard example mining algorithm is not set.")
+
 
     def inference(self, data=None, post_process=None, **kwargs):
         """
@@ -240,27 +299,48 @@ class JointInference(JobBase):
             callback_func = ClassFactory.get_cls(
                 ClassType.CALLBACK, post_process)
 
-        res = self.estimator.predict(data, **kwargs)
-        edge_result = deepcopy(res)
-
-        if callback_func:
-            res = callback_func(res)
-
-        self.lc_reporter.update_for_edge_inference()
+        # Try to obtain mining_mode, with the default value being edge_mining_cloud,
+        # which means performing edge inference first, then mining difficult cases, 
+        # and uploading to the cloud if necessary.
+        mining_mode = kwargs.get("mining_mode", "inference-then-mining")
 
         is_hard_example = False
-        cloud_result = None
+        sepeculative_decoding = False
 
-        if self.hard_example_mining_algorithm:
+        edge_result, cloud_result = None, None
+
+        if mining_mode == "inference-then-mining":
+            res, edge_result = self._get_edge_result(data, callback_func, **kwargs)
+            
+            self._check_hem_algorithm()
+            
             is_hard_example = self.hard_example_mining_algorithm(res)
             if is_hard_example:
-                try:
-                    cloud_data = self.cloud.inference(
-                        data.tolist(), post_process=post_process, **kwargs)
-                    cloud_result = cloud_data["result"]
-                except Exception as err:
-                    self.log.error(f"get cloud result error: {err}")
+                res, cloud_result = self._get_cloud_result(data, post_process=post_process, **kwargs)
+
+        elif mining_mode == "mining-then-inference":
+            # First conduct hard example mining, and then decide whether to execute on the edge or in the cloud.
+            self._check_hem_algorithm()
+
+            is_hard_example = self.hard_example_mining_algorithm(data)
+            if is_hard_example:
+                if not sepeculative_decoding:
+                    res, cloud_result = self._get_cloud_result(data, post_process=post_process, **kwargs)
                 else:
-                    res = cloud_result
-                self.lc_reporter.update_for_collaboration_inference()
+                    # do speculative_decoding
+                    pass
+            else:
+                res, edge_result = self._get_edge_result(data, callback_func, **kwargs)
+        
+        elif mining_mode == "self-design":
+            res = self.estimator.predict(data, **kwargs)
+
+            return callback_func(res) if callback_func else res
+
+        else:
+            raise ValueError(
+                "Mining Mode must be in ['mining-then-inference', 'inference-then-mining', 'self-design']"
+            )
+
         return [is_hard_example, res, edge_result, cloud_result]
+    
