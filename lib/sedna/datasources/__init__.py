@@ -16,13 +16,14 @@ from abc import ABC
 from pathlib import Path
 
 import json
+import random
 import numpy as np
 import pandas as pd
 
 from sedna.common.file_ops import FileOps
 from sedna.common.class_factory import ClassFactory, ClassType
 
-__all__ = ('BaseDataSource', 'TxtDataParse', 'CSVDataParse', 'JSONDataParse')
+__all__ = ('BaseDataSource', 'TxtDataParse', 'CSVDataParse', 'JSONDataParse', 'JsonlDataParse', 'JSONMetaDataParse')
 
 
 class BaseDataSource:
@@ -220,6 +221,7 @@ class JSONDataParse(BaseDataSource, ABC):
 
         return (res, img_info, file_name)
 
+
 class JsonlDataParse(BaseDataSource, ABC):
     """
     jsonl file which contain Structured Data parser
@@ -230,7 +232,6 @@ class JsonlDataParse(BaseDataSource, ABC):
     def parse(self, *args, **kwargs):
         x_data = []
         y_data = []
-        use_raw = kwargs.get("use_raw")
         for f in args:
             if not (f and FileOps.exists(f)):
                 continue
@@ -242,39 +243,72 @@ class JsonlDataParse(BaseDataSource, ABC):
         self.x = np.array(x_data)
         self.y = np.array(y_data)
 
-class JSONDataInfoParse(BaseDataSource, ABC):
+
+class JSONMetaDataParse(BaseDataSource, ABC):
     """
     parse data_info.json file
     """
     def __init__(self, data_type, func=None):
-        super(JSONDataInfoParse, self).__init__(data_type=data_type, func=func)
+        super(JSONMetaDataParse, self).__init__(data_type=data_type, func=func)
         self.need_other_info = True
+        
+    def parse_metadata(self, metadata_f):
+        with open(metadata_f, 'r', encoding='utf-8') as f:
+            json_data = json.load(f)
+        self.dataset_name = json_data['dataset']
+        self.description = json_data['description']
+        self.level_1_dim = json_data['level_1_dim']
+        self.level_2_dim = json_data['level_2_dim']
+        if 'level_3_dim' in json_data:
+            self.level_3_dim = json_data['level_3_dim']
+        if 'level_4_dim' in json_data:
+            self.level_4_dim = json_data['level_4_dim']
+            
+    def parse_prompts(self, prompt_f):
+        with open(prompt_f, 'r', encoding='utf-8') as f:
+            json_data = json.load(f)
+        self.system_prompt = json_data.get("system_prompt", None)
+        self.ice_template = json_data.get('ice_template', None)
+        self.prompt_template = json_data.get('prompt_template', None)
 
+    def parse_data(self, data_f, shot_nums):
+        with open(data_f, "r") as f:
+            data = [json.loads(line) for line in f.readlines()]
+
+        format_chat = lambda chat, item: {key: value.format(**item) for key, value in chat.items()}
+        
+        for item in data:
+            messages = []
+            if self.system_prompt:
+                messages.append(self.system_prompt)
+            if self.ice_template:
+                shots = random.sample([l for l in data if l != item], shot_nums)
+                for shot in shots:
+                    formatted_chat = [format_chat(chat, shot) for chat in self.ice_template]
+                    messages.extend(formatted_chat)
+            final_chat = format_chat(self.prompt_template, item)
+            messages.append(final_chat)
+            
+            self.x.append(messages)
+            self.y.append(item['response'])
+            self.explanation.append(item.get('explanation', ""))
+            self.judge_prompts.append(item.get('judge_prompt', ""))
+            self.level_3.append(item.get('level_3_dim', ""))
+            self.level_4.append(item.get('level_4_dim', ""))
+    
     def parse(self, *args, **kwargs):
         for f in args:
             if not (f and FileOps.exists(f)):
                 continue
-            with open(f, 'r', encoding='utf-8') as file:
-                json_data = json.load(file)
-                self.keys = json_data['keys']
-                self.answer_key = json_data['answer_key']
+            metadata_f = f
+            prompt_f = f.replace('metadata.json', 'prompts.json')
+            data_f = f.replace('metadata.json', 'data.jsonl')
             
-            prompt_f = f.replace('data_info.json', 'prompts.json')
-            with open(prompt_f, 'r', encoding='utf-8') as file:
-                json_data = json.load(file)
-                self.prompts = json_data
-            
-            data_f = f.replace('data_info.json', 'data.jsonl')
-            x_data = []
-            y_data = []
-            with open(data_f, 'r', encoding='utf-8') as file:
-                for line in file:
-                    line = json.loads(line)
-                    infer_user_template = self.prompts['infer_user_template']
-                    for each_key in self.keys:
-                        infer_user_template = infer_user_template.replace('{' + each_key + '}', line[each_key])
-                    infer_answer_template = self.prompts['infer_answer_template'].reace('{' + self.answer_key + '}', line[self.answer_key])
-                    x_data.append(infer_user_template)
-                    y_data.append(infer_answer_template)
-            self.x = np.array(x_data)
-            self.y = np.array(y_data)
+            self.parse_metadata(metadata_f)
+            self.parse_prompts(prompt_f)
+
+            attributes = ['x', 'y', 'explanation', 'judge_prompts', 'level_3', 'level_4']
+            for attr in attributes:
+                setattr(self, attr, [])
+                
+            self.parse_data(data_f, 3)
