@@ -271,7 +271,7 @@ class JSONMetaDataParse(BaseDataSource, ABC):
         self.ice_template = json_data.get('ice_template', None)
         self.prompt_template = json_data.get('prompt_template', None)
 
-    def parse_data(self, data_f, shot_nums):
+    def parse_data(self, data_f, shot_nums = 0):
         with open(data_f, "r") as f:
             data = [json.loads(line) for line in f.readlines()]
 
@@ -311,4 +311,4 @@ class JSONMetaDataParse(BaseDataSource, ABC):
             for attr in attributes:
                 setattr(self, attr, [])
                 
-            self.parse_data(data_f, 3)
+            self.parse_data(data_f, kwargs.get("shot_nums", 0))
