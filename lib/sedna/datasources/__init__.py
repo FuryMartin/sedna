@@ -277,12 +277,15 @@ class JSONMetaDataParse(BaseDataSource, ABC):
 
         format_chat = lambda chat, item: {key: value.format(**item) for key, value in chat.items()}
         
-        for item in data:
+        data_array = np.array(data)
+        data_index = np.arange(len(data))
+        
+        for i, item in enumerate(data):
             messages = []
             if self.system_prompt:
                 messages.append(self.system_prompt)
             if self.ice_template:
-                shots = random.sample([l for l in data if l != item], shot_nums)
+                shots = np.random.choice(data_array[data_index != i], size=shot_nums, replace=False)
                 for shot in shots:
                     formatted_chat = [format_chat(chat, shot) for chat in self.ice_template]
                     messages.extend(formatted_chat)
