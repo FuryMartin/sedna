@@ -16,12 +16,12 @@ from abc import ABC
 from pathlib import Path
 
 import json
-import random
 import numpy as np
 import pandas as pd
 
 from sedna.common.file_ops import FileOps
 from sedna.common.class_factory import ClassFactory, ClassType
+from sedna.common.log import LOGGER
 
 __all__ = ('BaseDataSource', 'TxtDataParse', 'CSVDataParse', 'JSONDataParse', 'JsonlDataParse', 'JSONMetaDataParse')
 
@@ -251,67 +251,55 @@ class JSONMetaDataParse(BaseDataSource, ABC):
     def __init__(self, data_type, func=None):
         super(JSONMetaDataParse, self).__init__(data_type=data_type, func=func)
         self.need_other_info = True
-        
-    def parse_metadata(self, metadata_f):
-        with open(metadata_f, 'r', encoding='utf-8') as f:
-            json_data = json.load(f)
-        self.dataset_name = json_data['dataset']
-        self.description = json_data['description']
-        self.level_1_dim = json_data['level_1_dim']
-        self.level_2_dim = json_data['level_2_dim']
-        if 'level_3_dim' in json_data:
-            self.level_3_dim = json_data['level_3_dim']
-        if 'level_4_dim' in json_data:
-            self.level_4_dim = json_data['level_4_dim']
-            
-    def parse_prompts(self, prompt_f):
-        with open(prompt_f, 'r', encoding='utf-8') as f:
-            json_data = json.load(f)
-        self.system_prompt = json_data.get("system_prompt", None)
-        self.ice_template = json_data.get('ice_template', None)
-        self.prompt_template = json_data.get('prompt_template', None)
-
-    def parse_data(self, data_f, shot_nums = 0):
-        with open(data_f, "r") as f:
-            data = [json.loads(line) for line in f.readlines()]
-
-        format_chat = lambda chat, item: {key: value.format(**item) for key, value in chat.items()}
-        
-        data_array = np.array(data)
-        data_index = np.arange(len(data))
-        
-        for i, item in enumerate(data):
-            messages = []
-            if self.system_prompt:
-                messages.append(self.system_prompt)
-            if self.ice_template:
-                shots = np.random.choice(data_array[data_index != i], size=shot_nums, replace=False)
-                for shot in shots:
-                    formatted_chat = [format_chat(chat, shot) for chat in self.ice_template]
-                    messages.extend(formatted_chat)
-            final_chat = format_chat(self.prompt_template, item)
-            messages.append(final_chat)
-            
-            self.x.append(messages)
-            self.y.append(item['response'])
-            self.explanation.append(item.get('explanation', ""))
-            self.judge_prompts.append(item.get('judge_prompt', ""))
-            self.level_3.append(item.get('level_3_dim', ""))
-            self.level_4.append(item.get('level_4_dim', ""))
-    
     def parse(self, *args, **kwargs):
         for f in args:
             if not (f and FileOps.exists(f)):
                 continue
-            metadata_f = f
-            prompt_f = f.replace('metadata.json', 'prompts.json')
-            data_f = f.replace('metadata.json', 'data.jsonl')
+            with open(f, 'r', encoding='utf-8') as file:
+                json_data = json.load(file)
+                self.dataset_name = json_data['dataset']
+                self.description = json_data['description']
+                self.level_1_dim = json_data['level_1_dim']
+                self.level_2_dim = json_data['level_2_dim']
+                if 'level_3_dim' in json_data:
+                    self.level_3_dim = json_data['level_3_dim']
+                if 'level_4_dim' in json_data:
+                    self.level_4_dim = json_data['level_4_dim']
             
-            self.parse_metadata(metadata_f)
-            self.parse_prompts(prompt_f)
 
-            attributes = ['x', 'y', 'explanation', 'judge_prompts', 'level_3', 'level_4']
-            for attr in attributes:
-                setattr(self, attr, [])
-                
-            self.parse_data(data_f, kwargs.get("shot_nums", 0))
+            data_f = f.replace('metadata.json', 'data.jsonl')
+            x_data = []
+            y_data = []
+            explanation_data = []
+            judge_prompts = []
+            level_3_data = []
+            level_4_data = []
+            with open(data_f, 'r', encoding='utf-8') as file:
+                for line in file:
+                    line = json.loads(line)
+                    cur_x = ""
+                    # "prompt" is optional
+                    if 'prompt' in line:
+                        cur_x += line['prompt']
+                    cur_x += line['query']
+                    x_data.append(cur_x)
+                    y_data.append(line['response'])
+                    # "explanation" is optional
+                    cur_exp = ""
+                    if 'explanation' in line:
+                        cur_exp = line['explanation']
+                    explanation_data.append(cur_exp)
+                    # "judge_prompt" is optional
+                    cur_jp = ""
+                    if "judge_prompt" in line:
+                        cur_jp += line['judge_prompt']
+                    judge_prompts.append(cur_jp)
+                    level_3_data.append(line['level_3_dim'])
+                    level_4_data.append(line['level_4_dim'])
+
+            self.x = np.array(x_data)
+            self.y = np.array(y_data)
+            self.explanation = np.array(explanation_data)
+            self.judge_prompts = np.array(judge_prompts)
+            self.level_3 = np.array(level_3_data)
+            self.level_4 = np.array(level_4_data)
